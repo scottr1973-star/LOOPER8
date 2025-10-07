@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Looper8+ — Full FX Rack (Tempo / Meter / Swing)</title>
+<link rel="stylesheet" href="css/looper.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>Looper8+ — Full FX Rack</h1>
+
+  <div class="card">
+    <div class="row">
+      <button id="initBtn" class="btn green">Enable Audio + Mic</button>
+      <button id="playBtn" class="btn gray" disabled>Play</button>
+      <button id="stopBtn" class="btn red" disabled>Stop</button>
+      <span class="spacer"></span>
+
+      <label class="row">
+        <span class="hint">Loop (Measures)</span>
+        <input id="loopMeasures" class="num" type="number" min="1" step="1" value="4" style="width:60px"/>
+        <select id="fitMode">
+          <option value="trim">Trim/Pad (no pitch)</option>
+          <option value="scale">Time-Scale (pitchy)</option>
+        </select>
+        <button id="applyLoop" class="btn small">Set</button>
+      </label>
+      <span id="loopBadge" class="badge" style="display:none">Loop: — s</span>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <button id="exportMix"  class="btn small" disabled title="Disabled until at least one recorded track exists">Export Mixdown (WAV)</button>
+      <button id="exportStems" class="btn small" disabled title="Disabled until at least one recorded track exists">Export Stems (WAV)</button>
+      <button id="saveSess"    class="btn small">Save Session</button>
+      <button id="loadSess"    class="btn small">Load Session</button>
+      <span id="toast" class="hint" style="margin-left:8px"></span>
+      <span class="spacer"></span>
+      <label class="row">
+        <input id="monitorChk" type="checkbox" disabled/>
+        <span class="hint">Monitor input</span>
+      </label>
+      <label class="row">
+        <span class="hint">Input Gain</span>
+        <input id="inputGain" class="vol" type="range" min="0" max="2" step="0.01" value="1" disabled/>
+      </label>
+      <div class="meterWrap">
+        <div class="meterBar"><div id="meterFill" class="meterFill"></div></div>
+      </div>
+    </div>
+
+    <div class="tempoCard" id="tempoCard">
+      <div class="tempoGroup">
+        <div class="hint">Tempo (BPM)</div>
+        <div class="tempoRow">
+          <input id="bpmInput" class="num" type="number" min="40" max="240" value="120" style="width:80px"/>
+          <input id="bpmSlider" type="range" min="40" max="240" value="120" style="width:220px"/>
+        </div>
+      </div>
+
+      <div class="tempoGroup">
+        <div class="hint">Time Signature</div>
+        <div class="tempoRow">
+          <select id="timeTop" class="num">
+            </select>
+          <span class="hint">/</span>
+          <select id="timeBottom" class="num">
+            <option value="2">2</option>
+            <option value="4" selected>4</option>
+            <option value="8">8</option>
+            <option value="16">16</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="tempoGroup">
+        <div class="hint">Swing</div>
+        <div class="tempoRow">
+          <input id="swingSlider" type="range" min="0" max="100" value="0" style="width:220px"/>
+          <div class="hint" id="swingLabel">0%</div>
+        </div>
+      </div>
+
+      <div class="tempoGroup">
+        <div class="hint">Metronome</div>
+        <div class="tempoRow" style="gap:8px; align-items:center;">
+          <button id="metroBtn" class="btn small gray" disabled>Metro</button>
+          <span class="hint">Pulse:</span>
+          <select id="metroSubdivisions" class="num" style="width: 80px;">
+            <option value="1" selected>Quarter</option>
+            <option value="2">Eighth</option>
+            <option value="4">16th</option>
+          </select>
+          <span class="hint">Vol:</span>
+          <input id="metroVol" type="range" min="0" max="1" step="0.01" value="0.4" disabled style="width: 70px;"/>
+        </div>
+        <div class="hint" id="measureInfo" style="margin-top: 2px;">Measure: — s</div>
+      </div>
+      </div>
+    </div>
+
+  <div id="tracks" class="tracks"></div>
+</div>
+
+<div id="fxPanel" style="display:none;">
+  <div id="fxPanelHeader">
+    <span id="fxPanelTitle">FX Rack</span>
+    <span id="fxPanelClose">&times;</span>
+  </div>
+  <div id="fxPanelContent"></div>
+  <div id="fxPanelResizeHandle"></div>
+</div>
+
+
+<script src="js/looper.js"></script>
+</body>
+</html>
