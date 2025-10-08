@@ -1,6 +1,8 @@
 (() => {
   // ====== Tunables ======
   const PRE_ROLL_MS = 120, TAIL_MS = 60, NO_LOOP_STOP_GRACE_MS = 80;
+  // NEW: History tunables
+  const MAX_HISTORY = 10; // Maximum number of undo steps
 
   // ====== State ======
   const N = 8, LED_CELLS = 32;
@@ -29,7 +31,12 @@
     muted:false, solo:false, leds:[], progressEl:null, statusEl:null, recChip:null,
     // FX nodes and state for each track
     fx: getDefaultFxState(),
-    fxNodes: {}
+    fxNodes: {},
+    // NEW: Undo/Redo State
+    history: [],
+    historyPointer: -1,
+    undoBtn: null,
+    redoBtn: null
   }));
 
   // ====== DOM ======
@@ -75,19 +82,27 @@
       const recBtn = document.createElement('button'); recBtn.className='btn small'; recBtn.textContent='Rec'; recBtn.disabled = true;
       const stopRecBtn = document.createElement('button'); stopRecBtn.className='btn small red'; stopRecBtn.textContent='Stop Rec'; stopRecBtn.disabled = true;
       const clrBtn = document.createElement('button'); clrBtn.className='btn small'; clrBtn.textContent='Clear'; clrBtn.disabled = true;
+      // NEW: Undo/Redo Buttons
+      const undoBtn = document.createElement('button'); undoBtn.className='btn small'; undoBtn.textContent='Undo'; undoBtn.disabled = true;
+      const redoBtn = document.createElement('button'); redoBtn.className='btn small'; redoBtn.textContent='Redo'; redoBtn.disabled = true;
       const fxBtn = document.createElement('button'); fxBtn.className='btn small blue'; fxBtn.textContent='FX'; fxBtn.disabled = true;
       const muteBtn = document.createElement('button'); muteBtn.className='btn small'; muteBtn.textContent='Mute'; muteBtn.disabled = true;
       const soloBtn = document.createElement('button'); soloBtn.className='btn small'; soloBtn.textContent='Solo'; soloBtn.disabled = true;
       const vol = document.createElement('input'); vol.className='vol'; vol.type='range'; vol.min=0; vol.max=1; vol.step=0.01; vol.value=0.9; vol.disabled = true;
       const chip = document.createElement('span'); chip.className='chip idle'; chip.textContent='Idle';
-      ctrls.append(recBtn, stopRecBtn, clrBtn, fxBtn, muteBtn, soloBtn, vol, chip); row.appendChild(ctrls);
+      ctrls.append(recBtn, stopRecBtn, clrBtn, undoBtn, redoBtn, fxBtn, muteBtn, soloBtn, vol, chip); row.appendChild(ctrls);
       
       const status = document.createElement('div'); status.className='status'; status.textContent='—'; row.appendChild(status);
       tr.statusEl = status; tr.recChip = chip;
+      // NEW: Store Undo/Redo button references
+      tr.undoBtn = undoBtn; tr.redoBtn = redoBtn;
       
       recBtn.addEventListener('click', ()=> safeRecordStart(tr.i, recBtn, stopRecBtn));
       stopRecBtn.addEventListener('click', ()=> stopRecording());
       clrBtn.addEventListener('click', ()=> clearTrack(tr.i));
+      // NEW: Undo/Redo listeners
+      undoBtn.addEventListener('click', ()=> undo(tr.i));
+      redoBtn.addEventListener('click', ()=> redo(tr.i));
       // FX button functionality is correct:
       fxBtn.addEventListener('click', () => openFxPanel(tr.i));
       muteBtn.addEventListener('click', ()=> toggleMute(tr.i, muteBtn));
@@ -103,7 +118,7 @@
     document.querySelectorAll('.ctrls .btn').forEach(b=>{
       const label = b.textContent;
       if (label==='Rec' || label==='FX') b.disabled = !on;
-      else if (label==='Stop Rec') b.disabled = true;
+      else if (label==='Stop Rec' || label==='Undo' || label==='Redo') b.disabled = true; // Undo/Redo disabled by default, managed by updateUndoRedoBtns
       else if (label !== 'Mute' && label !== 'Solo' && label !== 'Clear') b.disabled = !on;
     });
     document.querySelectorAll('.ctrls .btn[disabled]').forEach(b=>{
@@ -395,10 +410,109 @@
   }
   
   // ====== Recording, Track Ops, Utils... (kept intact except where needed) ======
+  // NEW: History functions
+  function pushHistory(i) {
+    const t = tr(i);
+    // Clear future history (redo stack)
+    if (t.historyPointer < t.history.length - 1) {
+      t.history.splice(t.historyPointer + 1);
+    }
+    // Only push if the current buffer is different from the last history entry (or if history is empty)
+    if (t.buffer !== t.history[t.history.length - 1]) {
+      // Add current buffer (can be null) to the history
+      t.history.push(t.buffer);
+    }
+    // Trim history to max size
+    if (t.history.length > MAX_HISTORY) {
+      t.history.shift();
+    }
+    t.historyPointer = t.history.length - 1;
+    updateUndoRedoBtns(i);
+  }
+
+  function applyBufferToTrack(i, buffer) {
+    const t = tr(i);
+    // Stop and disconnect old source
+    if (t.source){ try{ t.source.stop() }catch{} t.source.disconnect(); t.source=null; }
+    
+    t.buffer = buffer;
+
+    // Update UI status
+    t.statusEl.textContent = buffer ? 'Ready (' + buffer.duration.toFixed(2) + 's)' : '—';
+    // Update global export buttons
+    exportMixBtn.disabled = !tracks.some(x=>x.buffer);
+    exportStemsBtn.disabled = !tracks.some(x=>x.buffer);
+
+    // If playing, start new source
+    if (playing && buffer && loopLenSec) {
+      const src = audioCtx.createBufferSource();
+      src.buffer = normalizeToLoop(buffer, loopLenSec);
+      src.loop = true; src.loopStart = 0; src.loopEnd = loopLenSec;
+      src.connect(t.fxNodes.input);
+      const now = audioCtx.currentTime;
+      const elapsed = (now - startAt) % loopLenSec;
+      src.start(now, elapsed);
+      t.source = src;
+    } else {
+      // If buffer is null or not playing, reset progress
+      t.progressEl.style.width='0%';
+      t.leds.forEach(d=>d.classList.remove('on'));
+    }
+
+    // Check if loop length needs to be reset if all tracks are clear
+    if (!tracks.some(x=>x.buffer)){
+      loopLenSec=null;
+      setLoopLenDisplay();
+    }
+  }
+
+  function undo(i) {
+    const t = tr(i);
+    if (t.historyPointer > 0) {
+      t.historyPointer--;
+      // The current state is the buffer at historyPointer
+      applyBufferToTrack(i, t.history[t.historyPointer]);
+      updateUndoRedoBtns(i);
+    }
+  }
+
+  function redo(i) {
+    const t = tr(i);
+    if (t.historyPointer < t.history.length - 1) {
+      t.historyPointer++;
+      // The current state is the buffer at historyPointer
+      applyBufferToTrack(i, t.history[t.historyPointer]);
+      updateUndoRedoBtns(i);
+    }
+  }
+
+  function updateUndoRedoBtns(i) {
+    const t = tr(i);
+    // Can undo if there is a previous state in history (pointer > 0)
+    t.undoBtn.disabled = t.historyPointer <= 0;
+    // Can redo if there is a next state in history (pointer < max index)
+    t.redoBtn.disabled = t.historyPointer >= t.history.length - 1;
+  }
+  // END NEW: History functions
+
+
   async function safeRecordStart(i,recBtn,stopRecBtn){ if(recBusy)return;recBusy=true;tr(i).recChip.className='chip arm';tr(i).recChip.textContent='Arming…';await ensureAudioReady();const ok=await ensureMic();if(!ok){tr(i).recChip.className='chip idle';tr(i).recChip.textContent='Idle';recBusy=false;return}monitorPrevValue=monitorGain?monitorGain.gain.value:0;if(monitorGain)monitorGain.gain.value=0.0;recBtn.disabled=true;stopRecBtn.disabled=false;recordingTrack=i;chunks=[];tr(i).statusEl.textContent='Recording…';tr(i).progressEl.classList.add('rec');tr(i).recChip.className='chip rec';tr(i).recChip.textContent='REC';const usingMediaRecorder=!!mediaRec;if(loopLenSec&&playing){const now=audioCtx.currentTime;const elapsed=(now-startAt)%loopLenSec;let timeToBoundary=loopLenSec-elapsed;if(timeToBoundary<PRE_ROLL_MS/1000+0.04)timeToBoundary+=loopLenSec;const boundaryAt=now+timeToBoundary;const stopAtCtx=boundaryAt+loopLenSec+(TAIL_MS/1000);if(usingMediaRecorder){let startActual=audioCtx.currentTime;try{mediaRec.start()}catch(e){toast('Recorder failed.');endRecUI(i);recBusy=false;restoreMonitorAfterRecord();return}recSchedule={track:i,startAtCtxActual:startActual,stopAtCtx,boundaryAtCtx:boundaryAt};sweepRecordLEDs(i);waitUntil(stopAtCtx,()=>{if(mediaRec&&mediaRec.state==='recording'){try{if(mediaRec.requestData)mediaRec.requestData()}catch{}mediaRec.stop()}})}else{fallbackRec.start();fallbackRec._startCtxActual=audioCtx.currentTime;recSchedule={track:i,startAtCtxActual:fallbackRec._startCtxActual,stopAtCtx,boundaryAtCtx:boundaryAt};sweepRecordLEDs(i);waitUntil(stopAtCtx,()=>{fallbackRec.stop();onRecordingComplete_Fallback(i)})}}else{if(usingMediaRecorder){try{mediaRec.start()}catch(e){toast('Recorder failed.');endRecUI(i);recBusy=false;restoreMonitorAfterRecord();return}sweepRecordLEDs(i)}else{fallbackRec.start();fallbackRec._startCtxActual=audioCtx.currentTime;sweepRecordLEDs(i)}}recBusy=false}
   function stopRecording(){const t=audioCtx.currentTime;const when=t+NO_LOOP_STOP_GRACE_MS/1000;if(mediaRec&&mediaRec.state==='recording'){waitUntil(when,()=>{try{if(mediaRec.requestData)mediaRec.requestData()}catch{}mediaRec.stop()})}else if(fallbackRec&&fallbackRec.isRecording){waitUntil(when,()=>{fallbackRec.stop();onRecordingComplete_Fallback(recordingTrack)})}}
   function waitUntil(whenCtxTime,fn){const tick=()=>{if(!audioCtx)return;if(audioCtx.currentTime>=whenCtxTime-0.001){fn();return}requestAnimationFrame(tick)};requestAnimationFrame(tick)}
-  async function onRecordingComplete_MediaRecorder(){const i=recordingTrack;recordingTrack=-1;tr(i).recChip.className='chip idle';tr(i).recChip.textContent='Idle';const blob=new Blob(chunks,{type:chunks[0]?.type||'audio/webm'});let ab;try{ab=await blob.arrayBuffer()}catch{endRecUI(i);restoreMonitorAfterRecord();return}let buf=await audioCtx.decodeAudioData(ab).catch(()=>null);if(!buf){toast('Decode failed.');endRecUI(i);restoreMonitorAfterRecord();return}buf=toMonoWithFades(buf,0.004);if(recSchedule&&recSchedule.track===i){const sr=buf.sampleRate;const startActual=recSchedule.startAtCtxActual;const boundary=recSchedule.boundaryAtCtx;let pre=Math.max(0,Math.floor((boundary-startActual)*sr));const want=Math.max(1,Math.floor(loopLenSec*sr));let data=buf.getChannelData(0);const headTrim=Math.min(pre,data.length);data=data.subarray(headTrim);const out=audioCtx.createBuffer(1,want,sr);out.getChannelData(0).set(data.subarray(0,want),0);buf=out;recSchedule=null}else{if(!loopLenSec){
+
+  async function onRecordingComplete_MediaRecorder(){
+    const i=recordingTrack; recordingTrack=-1; 
+    tr(i).recChip.className='chip idle'; tr(i).recChip.textContent='Idle';
+    // NEW: Save current state to history before recording result is applied
+    pushHistory(i);
+    const blob=new Blob(chunks,{type:chunks[0]?.type||'audio/webm'}); let ab; try{ab=await blob.arrayBuffer()}catch{endRecUI(i);restoreMonitorAfterRecord();return}
+    let buf=await audioCtx.decodeAudioData(ab).catch(()=>null); if(!buf){toast('Decode failed.');endRecUI(i);restoreMonitorAfterRecord();return}
+    buf=toMonoWithFades(buf,0.004);
+    if(recSchedule&&recSchedule.track===i){
+      const sr=buf.sampleRate;const startActual=recSchedule.startAtCtxActual;const boundary=recSchedule.boundaryAtCtx;
+      let pre=Math.max(0,Math.floor((boundary-startActual)*sr));const want=Math.max(1,Math.floor(loopLenSec*sr));let data=buf.getChannelData(0);const headTrim=Math.min(pre,data.length);data=data.subarray(headTrim);const out=audioCtx.createBuffer(1,want,sr);out.getChannelData(0).set(data.subarray(0,want),0);buf=out;recSchedule=null
+    } else{
+      if(!loopLenSec){
         // Calculate loop length based on measures on first recording if loop is not set
         const measures = Math.max(1, Math.round(buf.duration / (measureLength || computeMeasureLength())));
         loopLenSec = measures * (measureLength || computeMeasureLength());
@@ -406,22 +520,59 @@
       }
       buf=fitBufferToLoop(buf,loopLenSec);
     }
-    tracks[i].buffer=buf;tr(i).statusEl.textContent='Ready ('+buf.duration.toFixed(2)+'s)';exportMixBtn.disabled=false;exportStemsBtn.disabled=false;if(playing){if(tr(i).source){try{tr(i).source.stop()}catch{}tr(i).source.disconnect()}const src=audioCtx.createBufferSource();src.buffer=normalizeToLoop(buf,loopLenSec);src.loop=true;src.loopStart=0;src.loopEnd=loopLenSec;src.connect(tr(i).fxNodes.input);const now=audioCtx.currentTime;const elapsed=(now-startAt)%loopLenSec;src.start(now,elapsed);tr(i).source=src}endRecUI(i);restoreMonitorAfterRecord()}
-  function onRecordingComplete_Fallback(i){tr(i).recChip.className='chip idle';tr(i).recChip.textContent='Idle';let buf=fallbackRec.getAudioBuffer();if(!buf){endRecUI(i);restoreMonitorAfterRecord();return}buf=toMonoWithFades(buf,0.004);if(recSchedule&&recSchedule.track===i){const sr=buf.sampleRate;const startActual=recSchedule.startAtCtxActual;const boundary=recSchedule.boundaryAtCtx;const pre=Math.max(0,Math.floor((boundary-startActual)*sr));const want=Math.max(1,Math.floor(loopLenSec*sr));let data=buf.getChannelData(0);const headTrim=Math.min(pre,data.length);data=data.subarray(headTrim);const out=audioCtx.createBuffer(1,want,sr);out.getChannelData(0).set(data.subarray(0,want),0);buf=out;recSchedule=null}else{
-        // Calculate loop length based on measures on first recording if loop is not set
-        if (!loopLenSec){ 
-          const measures = Math.max(1, Math.round(buf.duration / (measureLength || computeMeasureLength())));
-          loopLenSec = measures * (measureLength || computeMeasureLength());
-          setLoopLenDisplay();
-        }
-        buf=fitBufferToLoop(buf,loopLenSec);
+    // NEW: Update track buffer and UI using the new function
+    applyBufferToTrack(i, buf);
+    // NEW: Update history pointer after successfully applying new buffer
+    tr(i).historyPointer = tr(i).history.length;
+    pushHistory(i); // Add the new state to history
+    
+    endRecUI(i);restoreMonitorAfterRecord()
+  }
+
+  function onRecordingComplete_Fallback(i){
+    tr(i).recChip.className='chip idle'; tr(i).recChip.textContent='Idle';
+    // NEW: Save current state to history before recording result is applied
+    pushHistory(i);
+    let buf=fallbackRec.getAudioBuffer();
+    if(!buf){endRecUI(i);restoreMonitorAfterRecord();return}
+    buf=toMonoWithFades(buf,0.004);
+    if(recSchedule&&recSchedule.track===i){
+      const sr=buf.sampleRate;const startActual=recSchedule.startAtCtxActual;const boundary=recSchedule.boundaryAtCtx;const pre=Math.max(0,Math.floor((boundary-startActual)*sr));const want=Math.max(1,Math.floor(loopLenSec*sr));let data=buf.getChannelData(0);const headTrim=Math.min(pre,data.length);data=data.subarray(headTrim);const out=audioCtx.createBuffer(1,want,sr);out.getChannelData(0).set(data.subarray(0,want),0);buf=out;recSchedule=null
+    }else{
+      // Calculate loop length based on measures on first recording if loop is not set
+      if (!loopLenSec){ 
+        const measures = Math.max(1, Math.round(buf.duration / (measureLength || computeMeasureLength())));
+        loopLenSec = measures * (measureLength || computeMeasureLength());
+        setLoopLenDisplay();
+      }
+      buf=fitBufferToLoop(buf,loopLenSec);
     }
-    tracks[i].buffer=buf;tr(i).statusEl.textContent='Ready ('+buf.duration.toFixed(2)+'s)';exportMixBtn.disabled=false;exportStemsBtn.disabled=false;if(playing){if(tr(i).source){try{tr(i).source.stop()}catch{}tr(i).source.disconnect()}const src=audioCtx.createBufferSource();src.buffer=normalizeToLoop(buf,loopLenSec);src.loop=true;src.loopStart=0;src.loopEnd=loopLenSec;src.connect(tr(i).fxNodes.input);const now=audioCtx.currentTime;const elapsed=(now-startAt)%loopLenSec;src.start(now,elapsed);tr(i).source=src}endRecUI(i);restoreMonitorAfterRecord()}
+    // NEW: Update track buffer and UI using the new function
+    applyBufferToTrack(i, buf);
+    // NEW: Update history pointer after successfully applying new buffer
+    tr(i).historyPointer = tr(i).history.length;
+    pushHistory(i); // Add the new state to history
+
+    endRecUI(i);restoreMonitorAfterRecord()
+  }
+
   function restoreMonitorAfterRecord(){if(!monitorGain)return;const wantsMonitor=monitorChk&&monitorChk.checked;monitorGain.gain.value=wantsMonitor?(typeof monitorPrevValue==='number'?monitorPrevValue:0.18):0.0}
   function endRecUI(i){document.querySelectorAll('.ctrls .btn').forEach(b=>{if(b.textContent==='Stop Rec')b.disabled=true;if(b.textContent==='Rec')b.disabled=false});const f=tr(i).progressEl;if(f)f.classList.remove('rec')}
   function sweepRecordLEDs(i){const r=tr(i);const tick=()=>{const recActive=(mediaRec&&mediaRec.state==='recording')||(fallbackRec&&fallbackRec.isRecording);if(!recActive){r.leds.forEach(d=>d.classList.remove('on'));return}const now=audioCtx.currentTime;const frac=loopLenSec&&playing?((now-startAt)%loopLenSec)/loopLenSec:((now*1.0)%1.0);const pos=Math.floor(frac*LED_CELLS)%LED_CELLS;r.leds.forEach((d,idx)=>d.classList.toggle('on',idx===pos));requestAnimationFrame(tick)};tick()}
   function tr(i){return tracks[i]}
-  function clearTrack(i){const t=tr(i);if(t.source){try{t.source.stop()}catch{}t.source.disconnect();t.source=null}t.buffer=null;t.statusEl.textContent='—';t.progressEl.style.width='0%';t.leds.forEach(d=>d.classList.remove('on'));if(!tracks.some(x=>x.buffer)){loopLenSec=null;setLoopLenDisplay();exportMixBtn.disabled=true;exportStemsBtn.disabled=true}}
+  function clearTrack(i){
+    // NEW: Push current state to history before clearing
+    pushHistory(i);
+    const t=tr(i);if(t.source){try{t.source.stop()}catch{}t.source.disconnect();t.source=null}
+    
+    // NEW: Update using the new buffer application function
+    applyBufferToTrack(i, null);
+    // NEW: Add the null state to history
+    pushHistory(i);
+
+    // t.buffer=null;t.statusEl.textContent='—';t.progressEl.style.width='0%';t.leds.forEach(d=>d.classList.remove('on'));
+    // if(!tracks.some(x=>x.buffer)){loopLenSec=null;setLoopLenDisplay();exportMixBtn.disabled=true;exportStemsBtn.disabled=true} // Handled by applyBufferToTrack
+  }
   function toggleMute(i,btn){const t=tr(i);t.muted=!t.muted;refreshGains();btn.textContent=t.muted?'Unmute':'Mute'}
   function toggleSolo(i,btn){const t=tr(i);t.solo=!t.solo;refreshGains();btn.textContent=t.solo?'Unsolo':'Solo'}
   function setVolume(i,v){const t=tr(i);if(!t.gainNode)return;t.gainNode.gain.value=v*(t.muted?0:1)*(anySolo()?(t.solo?1:0):1)}
@@ -440,23 +591,29 @@
 
     if (!loopLenSec){ loopLenSec = newLen; setLoopLenDisplay(); return; }
     
-    const conformed = tracks.map(t=>t.buffer?fitOrScale(t.buffer,newLen,fitModeSel.value):null);
-    tracks.forEach((t,idx)=>{ 
-        if (!conformed[idx]) return; 
-        t.buffer = conformed[idx]; 
-        if (playing) { 
-            if (t.source) { try{ t.source.stop() }catch{} t.source.disconnect(); } 
-            const src = audioCtx.createBufferSource(); 
-            src.buffer = normalizeToLoop(t.buffer,newLen); 
-            src.loop = true; src.loopEnd = newLen; 
-            src.connect(t.fxNodes.input); 
-            const now = audioCtx.currentTime, elapsed = (now - startAt) % newLen; 
-            src.start(now, elapsed); 
-            t.source = src; 
-        }
+    const conformed = tracks.map(t=>{
+      // NEW: Push history for each track about to be modified
+      pushHistory(t.i);
+      return t.buffer?fitOrScale(t.buffer,newLen,fitModeSel.value):null;
     });
+
+    tracks.forEach((t,idx)=>{ 
+      if (!conformed[idx]) {
+        // If buffer was null, the clear track already pushed null to history. 
+        // We only need to deal with the historyPointer being updated later.
+        return; 
+      } 
+      // NEW: Use the new function to apply the buffer
+      applyBufferToTrack(idx, conformed[idx]);
+    });
+    
+    // After all tracks are updated:
     loopLenSec = newLen; 
     setLoopLenDisplay();
+
+    // NEW: Push history for all tracks again to save the result of the batch operation
+    tracks.forEach(t => pushHistory(t.i));
+
   });
   
   function setLoopLenDisplay(){ 
@@ -475,17 +632,56 @@
   exportStemsBtn.addEventListener('click',()=>{if(!hasAudio()){toast('Record something first.');return}tracks.forEach((t,idx)=>{if(!t.buffer)return;const b=normalizeToLoop(t.buffer,loopLenSec);downloadBlobAs(bufferToWavBlob(b),`looper8_t${idx+1}_${loopLenSec.toFixed(2)}s.wav`)})});
   function hasAudio(){return!!loopLenSec&&tracks.some(t=>t.buffer)}
   function getVolForIndex(i){const row=document.querySelectorAll('.tracks .track')[i];return row?Number(row.querySelector('.vol').value)||1:1}
-  saveSessBtn.addEventListener('click',async()=>{if(!audioCtx){toast('Nothing to save yet.');return}const rowEls=Array.from(document.querySelectorAll('.tracks .track'));const loopSec=loopLenSec||(4*(measureLength||computeMeasureLength()));const payload={version:2,loopLenSec:loopSec,tracks:await Promise.all(tracks.map(async(t,idx)=>{const row=rowEls[idx];const vol=row?Number(row.querySelector('.vol').value)||0.9:0.9;const obj={muted:t.muted,solo:t.solo,vol,wavDataUrl:null,fx:t.fx};if(t.buffer){const b=normalizeToLoop(t.buffer,loopSec);const wavBlob=bufferToWavBlob(b);obj.wavDataUrl=await blobToDataURL(wavBlob)}return obj}))};const jsonBlob=new Blob([JSON.stringify(payload)],{type:'application/json'});downloadBlobAs(jsonBlob,`looper8_session.json`);toast('Session saved.')});
+  saveSessBtn.addEventListener('click',async()=>{if(!audioCtx){toast('Nothing to save yet.');return}const rowEls=Array.from(document.querySelectorAll('.tracks .track'));const loopSec=loopLenSec||(4*(measureLength||computeMeasureLength()));const payload={version:3,loopLenSec:loopSec,bpm,tsTop,tsBottom,swingPercent,
+    tracks:await Promise.all(tracks.map(async(t,idx)=>{const row=rowEls[idx];const vol=row?Number(row.querySelector('.vol').value)||0.9:0.9;const obj={muted:t.muted,solo:t.solo,vol,wavDataUrl:null,fx:t.fx,
+      // NEW: Save history - only saving buffers in history, not other track state
+      history: await Promise.all(t.history.map(async (buf) => buf ? await blobToDataURL(bufferToWavBlob(buf)) : null)),
+      historyPointer: t.historyPointer
+    };if(t.buffer){const b=normalizeToLoop(t.buffer,loopSec);const wavBlob=bufferToWavBlob(b);obj.wavDataUrl=await blobToDataURL(wavBlob)}return obj}))};const jsonBlob=new Blob([JSON.stringify(payload)],{type:'application/json'});downloadBlobAs(jsonBlob,`looper8_session.json`);toast('Session saved.')});
+  
   loadSessBtn.addEventListener('click',async()=>{if(!hiddenFileInput){hiddenFileInput=document.createElement('input');hiddenFileInput.type='file';hiddenFileInput.accept='application/json';hiddenFileInput.style.display='none';document.body.appendChild(hiddenFileInput);hiddenFileInput.addEventListener('change',async(e)=>{const file=e.target.files[0];if(!file)return;const text=await file.text().catch(()=>null);if(!text){toast('Load failed.');return}let payload=null;try{payload=JSON.parse(text)}catch{toast('Invalid session file.');return}await ensureAudioReady();stopPlayback();
             // Load loop length and update measures input
             loopLenSec=Math.max(0.5,Number(payload.loopLenSec)||2);
+            // Load tempo/time/swing from payload for measure calculation
+            bpm = Number(payload.bpm) || 120; bpmInput.value = bpm; bpmSlider.value = bpm;
+            tsTop = Number(payload.tsTop) || 4; timeTopSel.value = tsTop;
+            tsBottom = Number(payload.tsBottom) || 4; timeBottomSel.value = tsBottom;
+            swingPercent = Number(payload.swingPercent) || 0; swingSlider.value = swingPercent; swingLabel.textContent = swingPercent + '%';
+            updateMeasureDisplay(); // Recalculate measureLength based on loaded tempo
+            
             // Ensure loop length snaps to whole measures based on loaded tempo
-            if (!measureLength) measureLength = computeMeasureLength();
             const measures = Math.max(1, Math.round(loopLenSec / measureLength));
             loopLenSec = measures * measureLength;
             setLoopLenDisplay(); // This updates the new measures input field
             
-            const rowEls=Array.from(document.querySelectorAll('.tracks .track'));for(let i=0;i<tracks.length;i++){const t=tr(i);const data=payload.tracks?.[i];if(t.source){try{t.source.stop()}catch{}t.source.disconnect();t.source=null}t.buffer=null;const row=rowEls[i];const vol=data?.vol??0.9;if(row){row.querySelector('.vol').value=String(vol)}t.muted=!!data?.muted;t.solo=!!data?.solo;if (data?.fx) t.fx = { ...getDefaultFxState(), ...data.fx }; else t.fx = getDefaultFxState();updateAllFxForTrack(t);if(row){row.querySelectorAll('.ctrls .btn').forEach(b=>{if(b.textContent==='Mute')b.textContent=t.muted?'Unmute':'Mute';if(b.textContent==='Solo')b.textContent=t.solo?'Unsolo':'Solo'})}if(data?.wavDataUrl){const wavAb=dataURLToArrayBuffer(data.wavDataUrl);const buf=await audioCtx.decodeAudioData(wavAb).catch(()=>null);if(buf){t.buffer=normalizeToLoop(toMonoWithFades(buf,0.004),loopLenSec);t.statusEl.textContent='Ready ('+t.buffer.duration.toFixed(2)+'s)'}else{t.statusEl.textContent='—'}}else{t.statusEl.textContent='—'}}exportMixBtn.disabled=!tracks.some(x=>x.buffer);exportStemsBtn.disabled=!tracks.some(x=>x.buffer);refreshGains();toast('Session loaded.')})}hiddenFileInput.value='';hiddenFileInput.click()});
+            const rowEls=Array.from(document.querySelectorAll('.tracks .track'));for(let i=0;i<tracks.length;i++){const t=tr(i);const data=payload.tracks?.[i];if(t.source){try{t.source.stop()}catch{}t.source.disconnect();t.source=null}t.buffer=null;t.history=[];t.historyPointer=-1; // NEW: Reset history on load
+            const row=rowEls[i];const vol=data?.vol??0.9;if(row){row.querySelector('.vol').value=String(vol)}t.muted=!!data?.muted;t.solo=!!data?.solo;if (data?.fx) t.fx = { ...getDefaultFxState(), ...data.fx }; else t.fx = getDefaultFxState();updateAllFxForTrack(t);if(row){row.querySelectorAll('.ctrls .btn').forEach(b=>{if(b.textContent==='Mute')b.textContent=t.muted?'Unmute':'Mute';if(b.textContent==='Solo')b.textContent=t.solo?'Unsolo':'Solo'})}
+            
+            // NEW: Load history buffers
+            if (payload.version >= 3 && data?.history) {
+              const loadedHistory = await Promise.all(data.history.map(async (dataUrl) => {
+                if (!dataUrl) return null;
+                const wavAb = dataURLToArrayBuffer(dataUrl);
+                return await audioCtx.decodeAudioData(wavAb).catch(() => null);
+              }));
+              t.history = loadedHistory.filter(buf => buf !== null || data.history.find(d => d === null)); // Keep nulls if they were saved
+              t.historyPointer = data.historyPointer ?? -1;
+            }
+
+            if(data?.wavDataUrl){
+              const wavAb=dataURLToArrayBuffer(data.wavDataUrl);
+              const buf=await audioCtx.decodeAudioData(wavAb).catch(()=>null);
+              if(buf){
+                // NEW: Use applyBufferToTrack to set the initial buffer and update UI/playback
+                applyBufferToTrack(i, normalizeToLoop(toMonoWithFades(buf,0.004),loopLenSec));
+              }else{
+                t.statusEl.textContent='—';
+              }
+            }else{
+              t.statusEl.textContent='—';
+            }
+            updateUndoRedoBtns(i); // NEW: Update buttons after history/buffer load
+          }exportMixBtn.disabled=!tracks.some(x=>x.buffer);exportStemsBtn.disabled=!tracks.some(x=>x.buffer);refreshGains();toast('Session loaded.')})}hiddenFileInput.value='';hiddenFileInput.click()});
   function downloadBlobAs(blob,filename){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;a.rel='noopener';a.target='_blank';document.body.appendChild(a);a.click();setTimeout(()=>{try{document.body.removeChild(a)}catch{}URL.revokeObjectURL(url)},1500)}
   async function blobToDataURL(blob){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(blob)})}
   function dataURLToArrayBuffer(dataURL){const comma=dataURL.indexOf(',');const base64=dataURL.slice(comma+1);const bin=atob(base64);const len=bin.length;const buf=new ArrayBuffer(len);const view=new Uint8Array(buf);for(let i=0;i<len;i++)view[i]=bin.charCodeAt(i);return buf}
@@ -677,5 +873,8 @@
   // Initialize measureLength from defaults
   measureLength = computeMeasureLength();
   updateMeasureDisplay();
+
+  // NEW: Initial history push for all tracks (null state)
+  tracks.forEach(t => pushHistory(t.i));
 
 })();
