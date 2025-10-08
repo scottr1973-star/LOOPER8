@@ -60,7 +60,7 @@
         swingSlider = document.getElementById('swingSlider'), swingLabel = document.getElementById('swingLabel'),
         measureInfo = document.getElementById('measureInfo');
 
-  // populate top number select 1..32
+  // populate top number select 1..13
   for (let i=1;i<=32;i++){
     const opt = document.createElement('option'); opt.value = String(i); opt.textContent = String(i);
     if (i===4) opt.selected = true;
@@ -288,7 +288,7 @@
     const now = audioCtx.currentTime;
     let ref = playing ? startAt : now;
     const measuresSinceRef = Math.floor((now - ref) / measureLength);
-    // Start at the next whole measure boundary after current time
+    // Start at the next whole measure boundary after 'now'
     const nextMeasureBoundary = ref + (measuresSinceRef + 1) * measureLength;
     
     metroNextSubdivTime = nextMeasureBoundary;
@@ -413,26 +413,20 @@
   // NEW: History functions
   function pushHistory(i) {
     const t = tr(i);
-    const currentBuffer = t.buffer;
-    
     // Clear future history (redo stack)
     if (t.historyPointer < t.history.length - 1) {
       t.history.splice(t.historyPointer + 1);
     }
-
-    // Check if the state is already the last item in history.
-    // If history is empty, or if the current buffer is different from the last buffer in history.
-    const lastHistoryItem = t.history.length > 0 ? t.history[t.history.length - 1] : undefined;
-
-    if (t.history.length === 0 || currentBuffer !== lastHistoryItem) {
-      t.history.push(currentBuffer);
-      // Trim history to max size
-      if (t.history.length > MAX_HISTORY) {
-        t.history.shift();
-      }
-      t.historyPointer = t.history.length - 1;
+    // Only push if the current buffer is different from the last history entry (or if history is empty)
+    if (t.buffer !== t.history[t.history.length - 1]) {
+      // Add current buffer (can be null) to the history
+      t.history.push(t.buffer);
     }
-    
+    // Trim history to max size
+    if (t.history.length > MAX_HISTORY) {
+      t.history.shift();
+    }
+    t.historyPointer = t.history.length - 1;
     updateUndoRedoBtns(i);
   }
 
@@ -465,9 +459,9 @@
       t.leds.forEach(d=>d.classList.remove('on'));
     }
 
-    // FIX: Removed the loopLenSec=null reset. The loop length is now sticky 
-    // and tied to the measure input/BPM, even if all tracks are clear.
+    // Check if loop length needs to be reset if all tracks are clear
     if (!tracks.some(x=>x.buffer)){
+      loopLenSec=null;
       setLoopLenDisplay();
     }
   }
@@ -502,7 +496,7 @@
   // END NEW: History functions
 
 
-  async function safeRecordStart(i,recBtn,stopRecBtn){ if(recBusy)return;recBusy=true;tr(i).recChip.className='chip arm';tr(i).recChip.textContent='Arming…';await ensureAudioReady();const ok=await ensureMic();if(!ok){tr(i).recChip.className='chip idle';tr(i).recChip.textContent='Idle';recBusy=false;restoreMonitorAfterRecord();return}monitorPrevValue=monitorGain?monitorGain.gain.value:0;if(monitorGain)monitorGain.gain.value=0.0;recBtn.disabled=true;stopRecBtn.disabled=false;recordingTrack=i;chunks=[];tr(i).statusEl.textContent='Recording…';tr(i).progressEl.classList.add('rec');tr(i).recChip.className='chip rec';tr(i).recChip.textContent='REC';const usingMediaRecorder=!!mediaRec;if(loopLenSec&&playing){const now=audioCtx.currentTime;const elapsed=(now-startAt)%loopLenSec;let timeToBoundary=loopLenSec-elapsed;if(timeToBoundary<PRE_ROLL_MS/1000+0.04)timeToBoundary+=loopLenSec;const boundaryAt=now+timeToBoundary;const stopAtCtx=boundaryAt+loopLenSec+(TAIL_MS/1000);if(usingMediaRecorder){let startActual=audioCtx.currentTime;try{mediaRec.start()}catch(e){toast('Recorder failed.');endRecUI(i);recBusy=false;restoreMonitorAfterRecord();return}recSchedule={track:i,startAtCtxActual:startActual,stopAtCtx,boundaryAtCtx:boundaryAt};sweepRecordLEDs(i);waitUntil(stopAtCtx,()=>{if(mediaRec&&mediaRec.state==='recording'){try{if(mediaRec.requestData)mediaRec.requestData()}catch{}mediaRec.stop()}})}else{fallbackRec.start();fallbackRec._startCtxActual=audioCtx.currentTime;recSchedule={track:i,startAtCtxActual:fallbackRec._startCtxActual,stopAtCtx,boundaryAtCtx:boundaryAt};sweepRecordLEDs(i);waitUntil(stopAtCtx,()=>{fallbackRec.stop();onRecordingComplete_Fallback(i)})}}else{if(usingMediaRecorder){try{mediaRec.start()}catch(e){toast('Recorder failed.');endRecUI(i);recBusy=false;restoreMonitorAfterRecord();return}sweepRecordLEDs(i)}else{fallbackRec.start();fallbackRec._startCtxActual=audioCtx.currentTime;sweepRecordLEDs(i)}}recBusy=false}
+  async function safeRecordStart(i,recBtn,stopRecBtn){ if(recBusy)return;recBusy=true;tr(i).recChip.className='chip arm';tr(i).recChip.textContent='Arming…';await ensureAudioReady();const ok=await ensureMic();if(!ok){tr(i).recChip.className='chip idle';tr(i).recChip.textContent='Idle';recBusy=false;return}monitorPrevValue=monitorGain?monitorGain.gain.value:0;if(monitorGain)monitorGain.gain.value=0.0;recBtn.disabled=true;stopRecBtn.disabled=false;recordingTrack=i;chunks=[];tr(i).statusEl.textContent='Recording…';tr(i).progressEl.classList.add('rec');tr(i).recChip.className='chip rec';tr(i).recChip.textContent='REC';const usingMediaRecorder=!!mediaRec;if(loopLenSec&&playing){const now=audioCtx.currentTime;const elapsed=(now-startAt)%loopLenSec;let timeToBoundary=loopLenSec-elapsed;if(timeToBoundary<PRE_ROLL_MS/1000+0.04)timeToBoundary+=loopLenSec;const boundaryAt=now+timeToBoundary;const stopAtCtx=boundaryAt+loopLenSec+(TAIL_MS/1000);if(usingMediaRecorder){let startActual=audioCtx.currentTime;try{mediaRec.start()}catch(e){toast('Recorder failed.');endRecUI(i);recBusy=false;restoreMonitorAfterRecord();return}recSchedule={track:i,startAtCtxActual:startActual,stopAtCtx,boundaryAtCtx:boundaryAt};sweepRecordLEDs(i);waitUntil(stopAtCtx,()=>{if(mediaRec&&mediaRec.state==='recording'){try{if(mediaRec.requestData)mediaRec.requestData()}catch{}mediaRec.stop()}})}else{fallbackRec.start();fallbackRec._startCtxActual=audioCtx.currentTime;recSchedule={track:i,startAtCtxActual:fallbackRec._startCtxActual,stopAtCtx,boundaryAtCtx:boundaryAt};sweepRecordLEDs(i);waitUntil(stopAtCtx,()=>{fallbackRec.stop();onRecordingComplete_Fallback(i)})}}else{if(usingMediaRecorder){try{mediaRec.start()}catch(e){toast('Recorder failed.');endRecUI(i);recBusy=false;restoreMonitorAfterRecord();return}sweepRecordLEDs(i)}else{fallbackRec.start();fallbackRec._startCtxActual=audioCtx.currentTime;sweepRecordLEDs(i)}}recBusy=false}
   function stopRecording(){const t=audioCtx.currentTime;const when=t+NO_LOOP_STOP_GRACE_MS/1000;if(mediaRec&&mediaRec.state==='recording'){waitUntil(when,()=>{try{if(mediaRec.requestData)mediaRec.requestData()}catch{}mediaRec.stop()})}else if(fallbackRec&&fallbackRec.isRecording){waitUntil(when,()=>{fallbackRec.stop();onRecordingComplete_Fallback(recordingTrack)})}}
   function waitUntil(whenCtxTime,fn){const tick=()=>{if(!audioCtx)return;if(audioCtx.currentTime>=whenCtxTime-0.001){fn();return}requestAnimationFrame(tick)};requestAnimationFrame(tick)}
 
@@ -516,10 +510,10 @@
     buf=toMonoWithFades(buf,0.004);
     if(recSchedule&&recSchedule.track===i){
       const sr=buf.sampleRate;const startActual=recSchedule.startAtCtxActual;const boundary=recSchedule.boundaryAtCtx;
-      let pre=Math.max(0,Math.floor((boundary-startActual)*sr));const want=Math.max(1,Math.floor(loopLenSec*sr));let data=buf.getChannelData(0);const headTrim=Math.min(pre,data.length);data=data.subarray(headTrim);const out=audioCtx.createBuffer(1,want,sr);out.getChannelData(0).set(data.subarray(headTrim,headTrim+want),0);buf=out;recSchedule=null
+      let pre=Math.max(0,Math.floor((boundary-startActual)*sr));const want=Math.max(1,Math.floor(loopLenSec*sr));let data=buf.getChannelData(0);const headTrim=Math.min(pre,data.length);data=data.subarray(headTrim);const out=audioCtx.createBuffer(1,want,sr);out.getChannelData(0).set(data.subarray(0,want),0);buf=out;recSchedule=null
     } else{
-      // If loopLenSec is null here, it means this was the *first* recording in a session
       if(!loopLenSec){
+        // Calculate loop length based on measures on first recording if loop is not set
         const measures = Math.max(1, Math.round(buf.duration / (measureLength || computeMeasureLength())));
         loopLenSec = measures * (measureLength || computeMeasureLength());
         setLoopLenDisplay();
@@ -528,8 +522,9 @@
     }
     // NEW: Update track buffer and UI using the new function
     applyBufferToTrack(i, buf);
-    // CRITICAL FIX: Push the new buffer state to history
-    pushHistory(i); 
+    // NEW: Update history pointer after successfully applying new buffer
+    tr(i).historyPointer = tr(i).history.length;
+    pushHistory(i); // Add the new state to history
     
     endRecUI(i);restoreMonitorAfterRecord()
   }
@@ -544,7 +539,7 @@
     if(recSchedule&&recSchedule.track===i){
       const sr=buf.sampleRate;const startActual=recSchedule.startAtCtxActual;const boundary=recSchedule.boundaryAtCtx;const pre=Math.max(0,Math.floor((boundary-startActual)*sr));const want=Math.max(1,Math.floor(loopLenSec*sr));let data=buf.getChannelData(0);const headTrim=Math.min(pre,data.length);data=data.subarray(headTrim);const out=audioCtx.createBuffer(1,want,sr);out.getChannelData(0).set(data.subarray(0,want),0);buf=out;recSchedule=null
     }else{
-      // If loopLenSec is null here, it means this was the *first* recording in a session
+      // Calculate loop length based on measures on first recording if loop is not set
       if (!loopLenSec){ 
         const measures = Math.max(1, Math.round(buf.duration / (measureLength || computeMeasureLength())));
         loopLenSec = measures * (measureLength || computeMeasureLength());
@@ -554,8 +549,9 @@
     }
     // NEW: Update track buffer and UI using the new function
     applyBufferToTrack(i, buf);
-    // CRITICAL FIX: Push the new buffer state to history
-    pushHistory(i); 
+    // NEW: Update history pointer after successfully applying new buffer
+    tr(i).historyPointer = tr(i).history.length;
+    pushHistory(i); // Add the new state to history
 
     endRecUI(i);restoreMonitorAfterRecord()
   }
@@ -565,14 +561,17 @@
   function sweepRecordLEDs(i){const r=tr(i);const tick=()=>{const recActive=(mediaRec&&mediaRec.state==='recording')||(fallbackRec&&fallbackRec.isRecording);if(!recActive){r.leds.forEach(d=>d.classList.remove('on'));return}const now=audioCtx.currentTime;const frac=loopLenSec&&playing?((now-startAt)%loopLenSec)/loopLenSec:((now*1.0)%1.0);const pos=Math.floor(frac*LED_CELLS)%LED_CELLS;r.leds.forEach((d,idx)=>d.classList.toggle('on',idx===pos));requestAnimationFrame(tick)};tick()}
   function tr(i){return tracks[i]}
   function clearTrack(i){
-    // NEW: Push current state to history before clearing (e.g., pushes 'buf')
+    // NEW: Push current state to history before clearing
     pushHistory(i);
     const t=tr(i);if(t.source){try{t.source.stop()}catch{}t.source.disconnect();t.source=null}
     
-    // NEW: Update using the new buffer application function (sets t.buffer = null)
+    // NEW: Update using the new buffer application function
     applyBufferToTrack(i, null);
-    // CRITICAL FIX: Add the null state to history
+    // NEW: Add the null state to history
     pushHistory(i);
+
+    // t.buffer=null;t.statusEl.textContent='—';t.progressEl.style.width='0%';t.leds.forEach(d=>d.classList.remove('on'));
+    // if(!tracks.some(x=>x.buffer)){loopLenSec=null;setLoopLenDisplay();exportMixBtn.disabled=true;exportStemsBtn.disabled=true} // Handled by applyBufferToTrack
   }
   function toggleMute(i,btn){const t=tr(i);t.muted=!t.muted;refreshGains();btn.textContent=t.muted?'Unmute':'Mute'}
   function toggleSolo(i,btn){const t=tr(i);t.solo=!t.solo;refreshGains();btn.textContent=t.solo?'Unsolo':'Solo'}
@@ -593,26 +592,28 @@
     if (!loopLenSec){ loopLenSec = newLen; setLoopLenDisplay(); return; }
     
     const conformed = tracks.map(t=>{
-      // NEW: Push history for each track about to be modified (saves old state)
+      // NEW: Push history for each track about to be modified
       pushHistory(t.i);
       return t.buffer?fitOrScale(t.buffer,newLen,fitModeSel.value):null;
     });
 
     tracks.forEach((t,idx)=>{ 
-      if (!conformed[idx] && t.buffer) {
-        // Track had audio but is now null, we need to push null state
-        applyBufferToTrack(idx, conformed[idx]);
-      } else if (conformed[idx]) {
-        // Track has new audio buffer
-        applyBufferToTrack(idx, conformed[idx]);
-      }
-      // CRITICAL FIX: Push history for all tracks again to save the result of the batch operation
-      pushHistory(idx); 
+      if (!conformed[idx]) {
+        // If buffer was null, the clear track already pushed null to history. 
+        // We only need to deal with the historyPointer being updated later.
+        return; 
+      } 
+      // NEW: Use the new function to apply the buffer
+      applyBufferToTrack(idx, conformed[idx]);
     });
     
     // After all tracks are updated:
     loopLenSec = newLen; 
     setLoopLenDisplay();
+
+    // NEW: Push history for all tracks again to save the result of the batch operation
+    tracks.forEach(t => pushHistory(t.i));
+
   });
   
   function setLoopLenDisplay(){ 
@@ -628,7 +629,7 @@
   }
 
   exportMixBtn.addEventListener('click',async()=>{if(!hasAudio()){toast('Record something first.');return}const sr=audioCtx?.sampleRate||44100;const len=Math.floor(loopLenSec*sr);const off=new OfflineAudioContext(1,len,sr);tracks.forEach(t=>{if(!t.buffer)return;const src=off.createBufferSource();src.buffer=normalizeToLoop(t.buffer,loopLenSec);src.loop=true;src.loopStart=0;src.loopEnd=loopLenSec;const g=off.createGain();const vol=getVolForIndex(t.i);const gate=t.muted?0:(anySolo()?(t.solo?1:0):1);g.gain.value=vol*gate;src.connect(g).connect(off.destination);src.start(0)});const rendered=await off.startRendering();downloadBlobAs(bufferToWavBlob(rendered),`looper8_mix_${loopLenSec.toFixed(2)}s.wav`)});
-  exportStemsBtn.addEventListener('click',()=>{if(!hasAudio()){toast('Record something first.');return}tracks.forEach((t,idx)=>{if(!t.buffer)return;const b=normalizeToLoop(t.buffer,loopLenSec);downloadBlobAs(bufferToWavBlob(b),`looper8_t${idx+1}_${loopLenSec.toFixed(2)}s.wav`)}).filter(b=>b)});
+  exportStemsBtn.addEventListener('click',()=>{if(!hasAudio()){toast('Record something first.');return}tracks.forEach((t,idx)=>{if(!t.buffer)return;const b=normalizeToLoop(t.buffer,loopLenSec);downloadBlobAs(bufferToWavBlob(b),`looper8_t${idx+1}_${loopLenSec.toFixed(2)}s.wav`)})});
   function hasAudio(){return!!loopLenSec&&tracks.some(t=>t.buffer)}
   function getVolForIndex(i){const row=document.querySelectorAll('.tracks .track')[i];return row?Number(row.querySelector('.vol').value)||1:1}
   saveSessBtn.addEventListener('click',async()=>{if(!audioCtx){toast('Nothing to save yet.');return}const rowEls=Array.from(document.querySelectorAll('.tracks .track'));const loopSec=loopLenSec||(4*(measureLength||computeMeasureLength()));const payload={version:3,loopLenSec:loopSec,bpm,tsTop,tsBottom,swingPercent,
@@ -663,8 +664,8 @@
                 const wavAb = dataURLToArrayBuffer(dataUrl);
                 return await audioCtx.decodeAudioData(wavAb).catch(() => null);
               }));
-              t.history = loadedHistory.slice(0, MAX_HISTORY); 
-              t.historyPointer = data.historyPointer ?? (t.history.length > 0 ? t.history.length - 1 : -1);
+              t.history = loadedHistory.filter(buf => buf !== null || data.history.find(d => d === null)); // Keep nulls if they were saved
+              t.historyPointer = data.historyPointer ?? -1;
             }
 
             if(data?.wavDataUrl){
@@ -685,7 +686,7 @@
   async function blobToDataURL(blob){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(blob)})}
   function dataURLToArrayBuffer(dataURL){const comma=dataURL.indexOf(',');const base64=dataURL.slice(comma+1);const bin=atob(base64);const len=bin.length;const buf=new ArrayBuffer(len);const view=new Uint8Array(buf);for(let i=0;i<len;i++)view[i]=bin.charCodeAt(i);return buf}
   function bufferToWavBlob(buffer){const wav=encodeWAV(buffer);return new Blob([wav],{type:'audio/wav'})}
-  function encodeWAV(buffer){const numCh=1,sr=buffer.sampleSample,data=buffer.getChannelData(0),len=data.length;const bytes=new ArrayBuffer(44+len*2);const view=new DataView(bytes);const W=(o,s)=>{for(let i=0;i<s.length;i++)view.setUint8(o+i,s.charCodeAt(i))};W(0,'RIFF');view.setUint32(4,36+len*2,true);W(8,'WAVE');W(12,'fmt ');view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,numCh,true);view.setUint32(24,sr,true);view.setUint32(28,sr*numCh*2,true);view.setUint16(32,numCh*2,true);view.setUint16(34,16,true);W(36,'data');view.setUint32(40,len*2,true);let off=44;for(let i=0;i<len;i++){let s=Math.max(-1,Math.min(1,data[i]));view.setInt16(off,s<0?s*0x8000:s*0x7fff,true);off+=2}return view}
+  function encodeWAV(buffer){const numCh=1,sr=buffer.sampleRate,data=buffer.getChannelData(0),len=data.length;const bytes=new ArrayBuffer(44+len*2);const view=new DataView(bytes);const W=(o,s)=>{for(let i=0;i<s.length;i++)view.setUint8(o+i,s.charCodeAt(i))};W(0,'RIFF');view.setUint32(4,36+len*2,true);W(8,'WAVE');W(12,'fmt ');view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,numCh,true);view.setUint32(24,sr,true);view.setUint32(28,sr*numCh*2,true);view.setUint16(32,numCh*2,true);view.setUint16(34,16,true);W(36,'data');view.setUint32(40,len*2,true);let off=44;for(let i=0;i<len;i++){let s=Math.max(-1,Math.min(1,data[i]));view.setInt16(off,s<0?s*0x8000:s*0x7fff,true);off+=2}return view}
   function toMonoWithFades(buf,fadeSec=0.003){const ch=buf.numberOfChannels,len=buf.length,out=audioCtx.createBuffer(1,len,buf.sampleRate);const o=out.getChannelData(0);if(ch===1){o.set(buf.getChannelData(0))}else{const a=buf.getChannelData(0),b=buf.getChannelData(1);for(let i=0;i<len;i++)o[i]=0.5*(a[i]+b[i])}const f=Math.max(1,Math.floor(fadeSec*out.sampleRate));for(let k=0;k<f;k++){const t=k/f;o[k]*=t;o[len-1-k]*=t}return out}
   function fitBufferToLoop(buf,loopLen){const sr=buf.sampleRate,want=Math.floor(loopLen*sr);const out=audioCtx.createBuffer(1,want,sr);const o=out.getChannelData(0);const iData=buf.getChannelData(0);const n=Math.min(want,buf.length);o.set(iData.subarray(0,n),0);const f=Math.max(1,Math.floor(0.003*sr));for(let i=0;i<f;i++){const t=i/f;o[want-1-i]*=t}return out}
   function fitOrScale(buf,newLen,mode){if(mode==='trim')return fitBufferToLoop(buf,newLen);const ratio=newLen/buf.duration;const sr=buf.sampleRate,outLen=Math.max(1,Math.floor(buf.length*ratio));const out=audioCtx.createBuffer(1,outLen,sr);const o=out.getChannelData(0),i=buf.getChannelData(0);for(let n=0;n<outLen;n++){const x=n/ratio;const i0=Math.floor(x),i1=Math.min(buf.length-1,i0+1);const f=x-i0;o[n]=i[i0]*(1-f)+i[i1]*f}const F=Math.max(1,Math.floor(0.003*sr));for(let k=0;k<F;k++){const t=k/F;o[k]*=t;o[outLen-1-k]*=t}return out}
